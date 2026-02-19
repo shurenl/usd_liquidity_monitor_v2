@@ -1,11 +1,14 @@
 import pandas as pd
+import pytest
 
 from usd_liquidity_monitor.report import (
     _compute_tech_metrics,
     _normalize_smtp_host,
     _resolve_smtp_port,
     _resolve_timezone,
+    generate_pdf_report,
     generate_daily_report,
+    send_email_report,
 )
 
 
@@ -99,3 +102,78 @@ def test_normalize_smtp_host_strips_scheme_and_port() -> None:
     assert _normalize_smtp_host("https://smtp.gmail.com:587") == "smtp.gmail.com"
     assert _normalize_smtp_host("smtp.gmail.com:587") == "smtp.gmail.com"
     assert _normalize_smtp_host("smtp.gmail.com") == "smtp.gmail.com"
+
+
+def test_generate_pdf_report_returns_pdf_bytes() -> None:
+    impact = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=80, freq="D"),
+            "ulsi": [0.5 + i * 0.002 + ((i % 6) * 0.0007) for i in range(80)],
+            "raw_nasdaq_composite": [10000 + i * 4 + ((i % 9) * 1.1) for i in range(80)],
+        }
+    )
+    impact["ulsi_change"] = impact["ulsi"].diff(5)
+    impact["equity_return"] = impact["raw_nasdaq_composite"].pct_change(5)
+    impact["forward_equity_return"] = impact["equity_return"].shift(-5)
+
+    bundle = {
+        "report_text": "USD Liquidity Daily Report\\n[ULSI Snapshot]\\n- Current ULSI: 0.9",
+        "ulsi_df": pd.DataFrame({"date": impact["date"], "ulsi": impact["ulsi"]}),
+        "analyses": [
+            {
+                "label": "NASDAQ Composite",
+                "column": "raw_nasdaq_composite",
+                "metrics": {"corr_60d": -0.2, "slope_1y": -0.01, "downside_hit_ratio": 0.55},
+                "impact_frame": impact,
+            }
+        ],
+        "as_of": pd.Timestamp("2025-03-21").date(),
+    }
+
+    payload = generate_pdf_report(bundle)
+
+    assert payload.startswith(b"%PDF")
+    assert len(payload) > 1000
+
+
+def test_send_email_report_attaches_pdf(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = {}
+
+    class DummySMTP:
+        def __init__(self, host, port, timeout=60):
+            sent["host"] = host
+            sent["port"] = port
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def starttls(self):
+            sent["starttls"] = True
+
+        def login(self, user, password):
+            sent["user"] = user
+            sent["password"] = password
+
+        def send_message(self, msg):
+            sent["message"] = msg
+
+    monkeypatch.setattr("usd_liquidity_monitor.report.smtplib.SMTP", DummySMTP)
+
+    send_email_report(
+        subject="test",
+        body="hello",
+        smtp_host="smtp.gmail.com",
+        smtp_port=587,
+        smtp_user="user@gmail.com",
+        smtp_password="app-pwd",
+        to_email="to@gmail.com",
+        attachments=[("report.pdf", b"%PDF-1.4\\n", "application/pdf")],
+    )
+
+    message = sent["message"]
+    attachments = list(message.iter_attachments())
+    assert len(attachments) == 1
+    assert attachments[0].get_filename() == "report.pdf"

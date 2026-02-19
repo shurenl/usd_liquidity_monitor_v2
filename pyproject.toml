@@ -16,7 +16,8 @@ dependencies = [
   "pandas>=2.2",
   "requests>=2.31",
   "streamlit>=1.33",
-  "plotly>=5.20"
+  "plotly>=5.20",
+  "matplotlib>=3.8"
 ]
 
 [project.optional-dependencies]

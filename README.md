@@ -109,7 +109,8 @@ Workflow behavior:
 
 1. Installs project dependencies.
 2. Generates daily ULSI + Nasdaq impact summary.
-3. Sends report by SMTP email.
+3. Generates a PDF with visual charts.
+4. Sends report by SMTP email with the PDF attachment.
 
 Required GitHub repository secrets:
 
@@ -134,4 +135,10 @@ Local dry-run (no email sent):
 
 ```bash
 ulsi-daily-report --dry-run
+```
+
+Local dry-run and save PDF:
+
+```bash
+ulsi-daily-report --dry-run --save-pdf /tmp/ulsi_daily_report.pdf
 ```
