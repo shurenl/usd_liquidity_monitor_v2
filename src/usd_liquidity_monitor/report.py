@@ -6,7 +6,9 @@ import argparse
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 import os
+import socket
 import smtplib
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -148,10 +150,15 @@ def send_email_report(subject: str, body: str, smtp_host: str, smtp_port: int, s
     msg["To"] = to_email
     msg.set_content(body)
 
-    with smtplib.SMTP(smtp_host, smtp_port, timeout=60) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_password)
-        server.send_message(msg)
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=60) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+    except socket.gaierror as exc:
+        raise ValueError(
+            "SMTP host cannot be resolved. Check SMTP_HOST secret format (use host only, e.g. smtp.gmail.com)."
+        ) from exc
 
 
 def _required_env(name: str) -> str:
@@ -174,6 +181,29 @@ def _resolve_smtp_port(raw_value: str | None, default: int = 587) -> int:
     if 1 <= port <= 65535:
         return port
     return default
+
+
+def _normalize_smtp_host(raw_value: str) -> str:
+    """Normalize SMTP host from common misconfigurations."""
+
+    candidate = (raw_value or "").strip().strip("'").strip('"')
+    if not candidate:
+        return ""
+
+    if "://" in candidate:
+        parsed = urlparse(candidate)
+        candidate = parsed.hostname or ""
+    else:
+        candidate = candidate.split("/", 1)[0]
+        if candidate.count(":") == 1:
+            host_part, port_part = candidate.rsplit(":", 1)
+            if port_part.isdigit():
+                candidate = host_part
+
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+
+    return candidate.strip()
 
 
 def _resolve_timezone(timezone_name: str | None, fallback: str = "Asia/Shanghai") -> ZoneInfo:
@@ -213,7 +243,10 @@ def main() -> None:
         print(report_text)
         return
 
-    smtp_host = _required_env("SMTP_HOST")
+    smtp_host_raw = _required_env("SMTP_HOST")
+    smtp_host = _normalize_smtp_host(smtp_host_raw)
+    if not smtp_host:
+        raise ValueError("Invalid SMTP_HOST format. Use host only, e.g. smtp.gmail.com")
     smtp_port = _resolve_smtp_port(os.getenv("SMTP_PORT"), default=587)
     smtp_user = _required_env("SMTP_USER")
     smtp_password = _required_env("SMTP_PASSWORD")

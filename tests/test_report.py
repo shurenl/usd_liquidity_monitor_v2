@@ -1,6 +1,12 @@
 import pandas as pd
 
-from usd_liquidity_monitor.report import _compute_tech_metrics, _resolve_smtp_port, _resolve_timezone, generate_daily_report
+from usd_liquidity_monitor.report import (
+    _compute_tech_metrics,
+    _normalize_smtp_host,
+    _resolve_smtp_port,
+    _resolve_timezone,
+    generate_daily_report,
+)
 
 
 def test_compute_tech_metrics_returns_values() -> None:
@@ -87,3 +93,9 @@ def test_resolve_smtp_port_fallback_for_invalid_input() -> None:
 
 def test_resolve_smtp_port_accepts_valid_port() -> None:
     assert _resolve_smtp_port("2525", default=587) == 2525
+
+
+def test_normalize_smtp_host_strips_scheme_and_port() -> None:
+    assert _normalize_smtp_host("https://smtp.gmail.com:587") == "smtp.gmail.com"
+    assert _normalize_smtp_host("smtp.gmail.com:587") == "smtp.gmail.com"
+    assert _normalize_smtp_host("smtp.gmail.com") == "smtp.gmail.com"
