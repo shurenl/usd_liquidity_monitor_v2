@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "usd-liquidity-monitor"
+version = "0.1.0"
+description = "Daily USD liquidity stress monitor with public data sources"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  {name = "USD Liquidity Monitor"}
+]
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "requests>=2.31",
+  "streamlit>=1.33",
+  "plotly>=5.20"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0"
+]
+
+[project.scripts]
+ulsi-sync = "usd_liquidity_monitor.cli:main"
+ulsi-dashboard = "usd_liquidity_monitor.app:main"
+ulsi-daily-report = "usd_liquidity_monitor.report:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
