@@ -1,6 +1,6 @@
 import pandas as pd
 
-from usd_liquidity_monitor.report import _compute_tech_metrics, _resolve_timezone, generate_daily_report
+from usd_liquidity_monitor.report import _compute_tech_metrics, _resolve_smtp_port, _resolve_timezone, generate_daily_report
 
 
 def test_compute_tech_metrics_returns_values() -> None:
@@ -78,3 +78,12 @@ def test_resolve_timezone_falls_back_for_empty_input() -> None:
 def test_resolve_timezone_falls_back_for_invalid_input() -> None:
     tz = _resolve_timezone("Not/A_Real_Zone")
     assert tz.key in {"Asia/Shanghai", "UTC"}
+
+
+def test_resolve_smtp_port_fallback_for_invalid_input() -> None:
+    assert _resolve_smtp_port("***", default=587) == 587
+    assert _resolve_smtp_port("abc", default=587) == 587
+
+
+def test_resolve_smtp_port_accepts_valid_port() -> None:
+    assert _resolve_smtp_port("2525", default=587) == 2525

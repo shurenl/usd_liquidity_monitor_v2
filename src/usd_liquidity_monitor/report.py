@@ -161,6 +161,21 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _resolve_smtp_port(raw_value: str | None, default: int = 587) -> int:
+    """Parse SMTP port with safe fallback for invalid inputs."""
+
+    candidate = (raw_value or "").strip()
+    if not candidate:
+        return default
+    try:
+        port = int(candidate)
+    except ValueError:
+        return default
+    if 1 <= port <= 65535:
+        return port
+    return default
+
+
 def _resolve_timezone(timezone_name: str | None, fallback: str = "Asia/Shanghai") -> ZoneInfo:
     """Resolve timezone safely, with fallback for empty/invalid input."""
 
@@ -199,7 +214,7 @@ def main() -> None:
         return
 
     smtp_host = _required_env("SMTP_HOST")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_port = _resolve_smtp_port(os.getenv("SMTP_PORT"), default=587)
     smtp_user = _required_env("SMTP_USER")
     smtp_password = _required_env("SMTP_PASSWORD")
     to_email = _required_env("REPORT_TO")
