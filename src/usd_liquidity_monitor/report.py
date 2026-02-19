@@ -161,16 +161,34 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _resolve_timezone(timezone_name: str | None, fallback: str = "Asia/Shanghai") -> ZoneInfo:
+    """Resolve timezone safely, with fallback for empty/invalid input."""
+
+    try:
+        fallback_tz = ZoneInfo(fallback)
+    except Exception:
+        fallback_tz = ZoneInfo("UTC")
+
+    candidate = (timezone_name or "").strip()
+    if not candidate:
+        return fallback_tz
+
+    try:
+        return ZoneInfo(candidate)
+    except Exception:
+        return fallback_tz
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate and send daily ULSI report")
     parser.add_argument("--as-of", type=date.fromisoformat, default=date.today(), help="Report date in YYYY-MM-DD")
     parser.add_argument("--lookback-days", type=int, default=365 * 3)
-    parser.add_argument("--timezone", type=str, default=os.getenv("REPORT_TIMEZONE", "Asia/Shanghai"))
+    parser.add_argument("--timezone", type=str, default=None, help="IANA timezone, e.g. Asia/Shanghai")
     parser.add_argument("--dry-run", action="store_true", help="Print report only, do not send email")
     args = parser.parse_args()
 
     report_text = generate_daily_report(as_of=args.as_of, lookback_days=args.lookback_days)
-    tz = ZoneInfo(args.timezone)
+    tz = _resolve_timezone(args.timezone or os.getenv("REPORT_TIMEZONE"), fallback="Asia/Shanghai")
     subject_date = datetime.now(tz).strftime("%Y-%m-%d")
     subject = f"[ULSI Daily] {subject_date}"
 
