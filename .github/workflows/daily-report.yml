@@ -2,8 +2,8 @@ name: Daily ULSI Email Report
 
 on:
   schedule:
-    # 09:00 Asia/Shanghai = 01:00 UTC
-    - cron: "0 1 * * *"
+    # 09:30 Asia/Shanghai = 01:30 UTC
+    - cron: "30 1 * * *"
   workflow_dispatch:
 
 jobs:

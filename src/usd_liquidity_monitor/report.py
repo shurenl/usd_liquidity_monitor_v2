@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from .data import fetch_all_series
-from .dashboard import build_dashboard_table
+from .dashboard import build_alert_objects, build_dashboard_table, format_alerts_for_display, summarize_data_quality
 from .metrics import compute_features, compute_ulsi
 
 
@@ -117,6 +117,22 @@ def _extract_component_snapshot(ulsi_df: pd.DataFrame) -> list[dict[str, object]
     return items
 
 
+def _build_rebased_index(frame: pd.DataFrame, columns: list[str], base: float = 100.0) -> pd.DataFrame:
+    out = pd.DataFrame({"date": frame["date"]})
+    for col in columns:
+        series = pd.to_numeric(frame[col], errors="coerce")
+        first_valid_idx = series.first_valid_index()
+        if first_valid_idx is None:
+            out[col] = np.nan
+            continue
+        first_value = series.loc[first_valid_idx]
+        if pd.isna(first_value) or float(first_value) == 0.0:
+            out[col] = np.nan
+            continue
+        out[col] = series / float(first_value) * base
+    return out
+
+
 def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str, object]:
     start = as_of - timedelta(days=lookback_days)
     raw_df, statuses = fetch_all_series(start=start, end=as_of)
@@ -125,6 +141,8 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
     table_df = build_dashboard_table(raw_df, features_df, ulsi_df)
     analyses = _extract_tech_analyses(table_df)
     component_snapshot = _extract_component_snapshot(ulsi_df)
+    quality_df = summarize_data_quality(raw_df, as_of=as_of)
+    alerts = build_alert_objects(ulsi_df)
 
     lines: list[str] = []
     lines.append(f"USD Liquidity Daily Report ({as_of.isoformat()})")
@@ -140,6 +158,8 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
             "table_df": table_df,
             "analyses": analyses,
             "components": component_snapshot,
+            "quality_df": quality_df,
+            "alerts": alerts,
             "statuses": statuses,
             "as_of": as_of,
         }
@@ -221,6 +241,8 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
         "table_df": table_df,
         "analyses": analyses,
         "components": component_snapshot,
+        "quality_df": quality_df,
+        "alerts": alerts,
         "statuses": statuses,
         "as_of": as_of,
     }
@@ -403,6 +425,232 @@ def _render_components_page(pdf, bundle: dict[str, object]) -> None:
     plt.close(fig)
 
 
+def _render_contributions_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    ulsi_df = pd.DataFrame(bundle["ulsi_df"]).copy()
+    ulsi_df["date"] = pd.to_datetime(ulsi_df["date"], errors="coerce")
+    ulsi_df = ulsi_df.dropna(subset=["date"]).sort_values("date")
+
+    fig, axes = plt.subplots(2, 1, figsize=(11.69, 8.27), gridspec_kw={"height_ratios": [1, 1.4]})
+    fig.suptitle("Contributions", fontsize=15, fontweight="bold")
+
+    contrib_cols = [c for c in ulsi_df.columns if c.startswith("contrib_")]
+    ax = axes[0]
+    latest = ulsi_df[["date"] + contrib_cols].dropna(subset=contrib_cols, how="all").tail(1) if contrib_cols else pd.DataFrame()
+    if not latest.empty:
+        values = latest.iloc[0][contrib_cols].astype(float)
+        labels = [c.replace("contrib_", "") for c in contrib_cols]
+        ax.bar(labels, values.values)
+        ax.axhline(0, color="gray", linewidth=1.0)
+        ax.set_title("Latest Component Contributions")
+        ax.set_ylabel("Contribution")
+    else:
+        ax.text(0.5, 0.5, "No contribution data", ha="center", va="center")
+        ax.set_axis_off()
+
+    ax = axes[1]
+    z_cols = [c for c in ["z_F", "z_G", "z_R", "z_C"] if c in ulsi_df.columns]
+    if z_cols:
+        heat_df = ulsi_df[["date"] + z_cols].tail(60).set_index("date").T.astype(float)
+        im = ax.imshow(heat_df.values, aspect="auto", cmap="RdYlBu_r")
+        ax.set_yticks(range(len(heat_df.index)))
+        ax.set_yticklabels(heat_df.index)
+        x_positions = np.linspace(0, max(len(heat_df.columns) - 1, 0), min(6, len(heat_df.columns))).astype(int)
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels([pd.Timestamp(heat_df.columns[i]).strftime("%Y-%m-%d") for i in x_positions], rotation=30, ha="right")
+        ax.set_title("Last 60 Days Z-score Heatmap")
+        fig.colorbar(im, ax=ax, orientation="vertical", fraction=0.02, pad=0.02)
+    else:
+        ax.text(0.5, 0.5, "No z-score data", ha="center", va="center")
+        ax.set_axis_off()
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _render_funding_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    table_df = pd.DataFrame(bundle["table_df"]).copy()
+    table_df["date"] = pd.to_datetime(table_df["date"], errors="coerce")
+    table_df = table_df.dropna(subset=["date"]).sort_values("date").tail(252)
+
+    fig, axes = plt.subplots(2, 1, figsize=(11.69, 8.27))
+    fig.suptitle("Funding", fontsize=15, fontweight="bold")
+
+    rate_cols = {"raw_sofr": "SOFR", "raw_effr": "EFFR", "raw_iorb": "IORB"}
+    ax = axes[0]
+    plotted = False
+    for col, label in rate_cols.items():
+        if col in table_df.columns:
+            series = pd.to_numeric(table_df[col], errors="coerce")
+            if series.notna().any():
+                ax.plot(table_df["date"], series, label=label, linewidth=1.5)
+                plotted = True
+    if plotted:
+        ax.set_title("SOFR / EFFR / IORB")
+        ax.set_ylabel("Rate (%)")
+        ax.legend(loc="best")
+    else:
+        ax.text(0.5, 0.5, "No funding rate data", ha="center", va="center")
+        ax.set_axis_off()
+
+    ax = axes[1]
+    if {"raw_sofr", "raw_effr", "raw_iorb"}.issubset(table_df.columns):
+        spread_df = table_df.copy()
+        spread_df["EFFR-IORB"] = pd.to_numeric(spread_df["raw_effr"], errors="coerce") - pd.to_numeric(spread_df["raw_iorb"], errors="coerce")
+        spread_df["SOFR-IORB"] = pd.to_numeric(spread_df["raw_sofr"], errors="coerce") - pd.to_numeric(spread_df["raw_iorb"], errors="coerce")
+        ax.plot(spread_df["date"], spread_df["EFFR-IORB"], label="EFFR-IORB", linewidth=1.5)
+        ax.plot(spread_df["date"], spread_df["SOFR-IORB"], label="SOFR-IORB", linewidth=1.5)
+        ax.axhline(0, color="gray", linewidth=1.0, linestyle="--")
+        ax.set_title("Key Funding Spreads")
+        ax.set_ylabel("Spread")
+        ax.legend(loc="best")
+    else:
+        ax.text(0.5, 0.5, "No spread data", ha="center", va="center")
+        ax.set_axis_off()
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _render_liquidity_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    table_df = pd.DataFrame(bundle["table_df"]).copy()
+    table_df["date"] = pd.to_datetime(table_df["date"], errors="coerce")
+    table_df = table_df.dropna(subset=["date"]).sort_values("date").tail(252)
+
+    fig, axes = plt.subplots(2, 1, figsize=(11.69, 8.27))
+    fig.suptitle("Liquidity", fontsize=15, fontweight="bold")
+
+    raw_map = {
+        "raw_reserves": "Bank Reserves",
+        "raw_tga": "TGA Balance",
+        "raw_fed_assets": "Fed Total Assets",
+        "raw_on_rrp": "ON RRP Usage",
+    }
+
+    ax = axes[0]
+    plotted = False
+    for col, label in raw_map.items():
+        if col in table_df.columns:
+            series = pd.to_numeric(table_df[col], errors="coerce") / 1000.0
+            if series.notna().any():
+                ax.plot(table_df["date"], series, label=label, linewidth=1.5)
+                plotted = True
+    if plotted:
+        ax.set_title("Liquidity Quantity Dynamics (bn USD)")
+        ax.set_ylabel("bn USD")
+        ax.legend(loc="best", fontsize=8)
+    else:
+        ax.text(0.5, 0.5, "No liquidity series", ha="center", va="center")
+        ax.set_axis_off()
+
+    ax = axes[1]
+    available = [col for col in raw_map if col in table_df.columns]
+    if available:
+        idx_df = _build_rebased_index(table_df[["date"] + available], available, base=100.0)
+        plotted = False
+        for col in available:
+            series = pd.to_numeric(idx_df[col], errors="coerce")
+            if series.notna().any():
+                ax.plot(idx_df["date"], series, label=raw_map[col], linewidth=1.5)
+                plotted = True
+        if plotted:
+            ax.set_title("Liquidity Quantity Dynamics (Rebased Index, start=100)")
+            ax.set_ylabel("Index")
+            ax.legend(loc="best", fontsize=8)
+        else:
+            ax.text(0.5, 0.5, "No rebased liquidity series", ha="center", va="center")
+            ax.set_axis_off()
+    else:
+        ax.text(0.5, 0.5, "No liquidity series", ha="center", va="center")
+        ax.set_axis_off()
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _render_alerts_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    ulsi_df = pd.DataFrame(bundle["ulsi_df"]).copy()
+    ulsi_df["date"] = pd.to_datetime(ulsi_df["date"], errors="coerce")
+    ulsi_df = ulsi_df.dropna(subset=["date"]).sort_values("date")
+    alert_df = format_alerts_for_display(list(bundle.get("alerts", [])))
+
+    fig, axes = plt.subplots(2, 1, figsize=(11.69, 8.27), gridspec_kw={"height_ratios": [1.2, 1]})
+    fig.suptitle("Alerts", fontsize=15, fontweight="bold")
+
+    ax = axes[0]
+    if not ulsi_df.empty and "alert_flag" in ulsi_df.columns:
+        ax.plot(ulsi_df["date"], pd.to_numeric(ulsi_df["ulsi"], errors="coerce"), label="ULSI", linewidth=1.5)
+        active = ulsi_df[ulsi_df["alert_flag"].eq(True)]
+        if not active.empty:
+            ax.scatter(active["date"], active["ulsi"], color="red", s=18, label="Alert ON")
+        ax.set_title("ULSI with Alert States")
+        ax.legend(loc="best")
+    else:
+        ax.text(0.5, 0.5, "No alert timeline data", ha="center", va="center")
+        ax.set_axis_off()
+
+    ax = axes[1]
+    ax.axis("off")
+    if alert_df.empty:
+        ax.text(0.02, 0.98, "No new alert event was triggered in the selected period.", va="top", ha="left")
+    else:
+        view = alert_df.tail(8).copy()
+        table = ax.table(cellText=view.values, colLabels=view.columns, loc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.scale(1, 1.4)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _render_data_quality_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    quality_df = pd.DataFrame(bundle.get("quality_df", pd.DataFrame())).copy()
+    status_rows = []
+    for name, status in dict(bundle.get("statuses", {})).items():
+        status_rows.append(
+            {
+                "Series": name,
+                "Source": status.source,
+                "Success": status.success,
+                "Rows": status.row_count,
+                "Latest Date": status.latest_date,
+                "Message": status.message,
+            }
+        )
+    status_df = pd.DataFrame(status_rows)
+
+    fig, axes = plt.subplots(2, 1, figsize=(11.69, 8.27))
+    fig.suptitle("Data Quality", fontsize=15, fontweight="bold")
+
+    for ax, df, title in [
+        (axes[0], quality_df.tail(12), "Freshness and Missingness"),
+        (axes[1], status_df.tail(12), "Sync Status"),
+    ]:
+        ax.axis("off")
+        if df.empty:
+            ax.text(0.02, 0.98, f"No {title.lower()} data.", va="top", ha="left")
+            continue
+        table = ax.table(cellText=df.values, colLabels=df.columns, loc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(7.5)
+        table.scale(1, 1.3)
+        ax.set_title(title)
+
+
 def generate_pdf_report(bundle: dict[str, object]) -> bytes:
     """Generate PDF bytes with visualized daily report."""
 
@@ -415,10 +663,15 @@ def generate_pdf_report(bundle: dict[str, object]) -> bytes:
     with PdfPages(output) as pdf:
         _render_summary_page(pdf, bundle)
         _render_components_page(pdf, bundle)
+        _render_contributions_page(pdf, bundle)
+        _render_funding_page(pdf, bundle)
+        _render_liquidity_page(pdf, bundle)
         analyses = list(bundle.get("analyses", []))
         if analyses:
             for analysis in analyses:
                 _render_tech_page(pdf, analysis)
+        _render_alerts_page(pdf, bundle)
+        _render_data_quality_page(pdf, bundle)
     output.seek(0)
     return output.read()
 

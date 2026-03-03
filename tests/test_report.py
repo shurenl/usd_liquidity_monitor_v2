@@ -141,6 +141,21 @@ def test_generate_pdf_report_returns_pdf_bytes() -> None:
                 "impact_frame": impact,
             }
         ],
+        "table_df": pd.DataFrame(
+            {
+                "date": impact["date"],
+                "raw_sofr": 5.1,
+                "raw_effr": 5.05,
+                "raw_iorb": 5.0,
+                "raw_reserves": 3_500_000.0,
+                "raw_tga": 700_000.0,
+                "raw_fed_assets": 8_500_000.0,
+                "raw_on_rrp": 250_000.0,
+            }
+        ),
+        "quality_df": pd.DataFrame({"series_name": ["sofr"], "latest_date": [pd.Timestamp("2025-03-21").date()], "lag_days": [0], "missing_ratio": [0.0]}),
+        "alerts": [],
+        "statuses": {},
         "as_of": pd.Timestamp("2025-03-21").date(),
     }
 

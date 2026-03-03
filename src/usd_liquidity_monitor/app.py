@@ -57,6 +57,19 @@ FACTOR_LABELS: dict[str, str] = {
     "C_t": "Credit Factor (C)",
 }
 
+FACTOR_FORMULAS: dict[str, str] = {
+    "F_t": "Formula: F_t = z_score(SOFR - IORB)",
+    "G_t": "Formula: G_t = z_score(TGA_t - TGA_{t-20})",
+    "R_t": "Formula: R_t = z_score(-(Reserves - MA252(Reserves))_t + (Reserves - MA252(Reserves))_{t-20})",
+    "C_t": "Formula: C_t = z_score(HY_OAS)",
+}
+
+MONITOR_SPECS: dict[str, tuple[str, str, str]] = {
+    "raw_move_proxy": ("MOVE Vol Proxy", "move_proxy", "Displayed as the current public proxy (NFCI) because a direct public MOVE feed is not configured."),
+    "raw_dxy": ("DXY Dollar Index", "index level", "Tracks broad USD strength. This monitor is informational only and does not feed into ULSI."),
+    "raw_yield_10y": ("US 10Y Treasury Yield", "yield (%)", "Tracks the latest 10-year Treasury yield changes. This monitor is informational only and does not feed into ULSI."),
+}
+
 
 @st.cache_data(ttl=6 * 60 * 60)
 def _load_data(start: date, end: date) -> dict[str, object]:
@@ -212,6 +225,14 @@ def _latest_delta(frame: pd.DataFrame, column: str) -> tuple[float | None, float
     return latest, delta
 
 
+def _format_metric_value(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None else "NA"
+
+
+def _format_metric_delta(delta: float | None) -> str | None:
+    return f"{delta:+.2f}" if delta is not None else None
+
+
 def main() -> None:
     st.set_page_config(page_title="USD Liquidity Stress Monitor", layout="wide")
     st.title("USD Liquidity Stress Monitor")
@@ -309,8 +330,8 @@ def main() -> None:
                     with container:
                         st.metric(
                             label,
-                            f"{latest_factor:.2f}" if latest_factor is not None else "NA",
-                            f"{delta_factor:+.2f}" if delta_factor is not None else None,
+                            _format_metric_value(latest_factor),
+                            _format_metric_delta(delta_factor),
                         )
                         factor_df = filtered_ulsi[["date", factor_col]].dropna().rename(columns={factor_col: "value"})
                         if not factor_df.empty:
@@ -323,7 +344,26 @@ def main() -> None:
                             )
                             fig_factor.add_hline(y=0, line_dash="dot", line_color="gray")
                             st.plotly_chart(fig_factor, width="stretch")
+                        st.caption(FACTOR_FORMULAS.get(factor_col, ""))
                         st.caption("Chart note: positive values mean this factor is adding upward pressure to ULSI; delta is vs. the previous valid observation.")
+
+        st.subheader("External Market Monitors")
+        monitor_pairs = [list(MONITOR_SPECS.keys())[i : i + 2] for i in range(0, len(MONITOR_SPECS), 2)]
+        filtered_table = _window_filter(table_df, end=end, window=window)
+        for pair in monitor_pairs:
+            cols = st.columns(len(pair))
+            for container, raw_col in zip(cols, pair):
+                if raw_col not in filtered_table.columns:
+                    continue
+                label, unit_label, note = MONITOR_SPECS[raw_col]
+                series_df = filtered_table[["date", raw_col]].dropna().rename(columns={raw_col: "value"})
+                latest_value, delta_value = _latest_delta(filtered_table, raw_col)
+                with container:
+                    st.metric(label, _format_metric_value(latest_value), _format_metric_delta(delta_value))
+                    if not series_df.empty:
+                        fig_monitor = px.line(series_df, x="date", y="value", markers=True, title=label)
+                        st.plotly_chart(fig_monitor, width="stretch")
+                    st.caption(f"Unit: {unit_label}. {note}")
 
     with tabs[2]:
         funding_cols = ["raw_sofr", "raw_effr", "raw_iorb"]
