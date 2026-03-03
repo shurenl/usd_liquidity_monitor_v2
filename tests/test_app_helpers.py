@@ -2,11 +2,14 @@ import pandas as pd
 import pytest
 
 from usd_liquidity_monitor.app import (
+    _build_overview_figure,
     _build_rebased_index,
     _convert_million_to_billion,
+    _latest_delta,
     _prepare_tech_impact_frame,
     _safe_linear_slope,
     _to_long_series,
+    _window_filter,
 )
 
 
@@ -80,3 +83,43 @@ def test_safe_linear_slope_detects_negative_relationship() -> None:
 
     assert slope is not None
     assert slope == pytest.approx(-1.0, abs=1e-9)
+
+
+def test_build_overview_figure_supports_dynamic_quantile_lines() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=5, freq="D"),
+            "ulsi": [0.4, 0.5, 0.7, 1.1, 1.4],
+            "q70_252": [None, None, 0.6, 0.6, 0.6],
+            "q85_252": [None, None, 1.0, 1.0, 1.0],
+            "q95_252": [None, None, 1.5, 1.5, 1.5],
+        }
+    )
+
+    fig = _build_overview_figure(frame)
+
+    # ULSI line + 3 quantile lines.
+    assert len(fig.data) == 4
+
+
+def test_window_filter_from_first_valid_ulsi() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=5, freq="D"),
+            "ulsi": [None, None, 0.2, 0.3, 0.4],
+        }
+    )
+
+    out = _window_filter(frame, end=pd.Timestamp("2025-01-05").date(), window="From 1st valid ULSI")
+
+    assert out["date"].min() == pd.Timestamp("2025-01-03")
+    assert out.shape[0] == 3
+
+
+def test_latest_delta_returns_latest_and_change() -> None:
+    frame = pd.DataFrame({"F_t": [None, 0.1, 0.4, 0.9]})
+
+    latest, delta = _latest_delta(frame, "F_t")
+
+    assert latest == pytest.approx(0.9)
+    assert delta == pytest.approx(0.5)

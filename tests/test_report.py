@@ -54,6 +54,10 @@ def test_generate_daily_report_contains_sections(monkeypatch) -> None:
         {
             "date": pd.to_datetime(["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-06"]),
             "ulsi": [0.2, 0.3, 0.4, 0.5],
+            "F_t": [0.1, 0.2, 0.25, 0.3],
+            "G_t": [0.0, 0.1, 0.1, 0.15],
+            "R_t": [-0.1, -0.05, 0.0, 0.05],
+            "C_t": [0.2, 0.2, 0.25, 0.3],
             "regime": ["Normal", "Normal", "Normal", "Watch"],
             "alert_flag": [False, False, False, False],
         }
@@ -75,6 +79,7 @@ def test_generate_daily_report_contains_sections(monkeypatch) -> None:
     text = generate_daily_report(as_of=pd.Timestamp("2025-01-06").date(), lookback_days=10)
 
     assert "[ULSI Snapshot]" in text
+    assert "[ULSI Components]" in text
     assert "[Tech Equity Impact]" in text
     assert "[Data Sync Summary]" in text
 
@@ -118,7 +123,16 @@ def test_generate_pdf_report_returns_pdf_bytes() -> None:
 
     bundle = {
         "report_text": "USD Liquidity Daily Report\\n[ULSI Snapshot]\\n- Current ULSI: 0.9",
-        "ulsi_df": pd.DataFrame({"date": impact["date"], "ulsi": impact["ulsi"]}),
+        "ulsi_df": pd.DataFrame(
+            {
+                "date": impact["date"],
+                "ulsi": impact["ulsi"],
+                "F_t": impact["ulsi"] * 0.5,
+                "G_t": impact["ulsi"] * 0.2,
+                "R_t": impact["ulsi"] * -0.1,
+                "C_t": impact["ulsi"] * 0.4,
+            }
+        ),
         "analyses": [
             {
                 "label": "NASDAQ Composite",

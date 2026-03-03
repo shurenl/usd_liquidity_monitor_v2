@@ -95,6 +95,28 @@ def _extract_tech_analyses(table_df: pd.DataFrame) -> list[dict[str, object]]:
     return analyses
 
 
+def _extract_component_snapshot(ulsi_df: pd.DataFrame) -> list[dict[str, object]]:
+    component_map = {
+        "F_t": "Funding Factor (F)",
+        "G_t": "Fiscal Factor (G)",
+        "R_t": "Reserves Factor (R)",
+        "C_t": "Credit Factor (C)",
+    }
+
+    if ulsi_df.empty:
+        return []
+
+    items: list[dict[str, object]] = []
+    for col, label in component_map.items():
+        if col not in ulsi_df.columns:
+            continue
+        series = pd.to_numeric(ulsi_df[col], errors="coerce").dropna()
+        latest = float(series.iloc[-1]) if not series.empty else None
+        delta = float(series.iloc[-1] - series.iloc[-2]) if series.shape[0] > 1 else None
+        items.append({"column": col, "label": label, "latest": latest, "delta": delta})
+    return items
+
+
 def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str, object]:
     start = as_of - timedelta(days=lookback_days)
     raw_df, statuses = fetch_all_series(start=start, end=as_of)
@@ -102,6 +124,7 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
     ulsi_df = compute_ulsi(features_df)
     table_df = build_dashboard_table(raw_df, features_df, ulsi_df)
     analyses = _extract_tech_analyses(table_df)
+    component_snapshot = _extract_component_snapshot(ulsi_df)
 
     lines: list[str] = []
     lines.append(f"USD Liquidity Daily Report ({as_of.isoformat()})")
@@ -116,6 +139,7 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
             "ulsi_df": ulsi_df,
             "table_df": table_df,
             "analyses": analyses,
+            "components": component_snapshot,
             "statuses": statuses,
             "as_of": as_of,
         }
@@ -124,6 +148,9 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
     ulsi_value = float(latest_row["ulsi"])
     regime = str(latest_row.get("regime", "NA"))
     alert = bool(latest_row.get("alert_flag", False))
+    q70 = pd.to_numeric(pd.Series([latest_row.get("q70_252")]), errors="coerce").iloc[0]
+    q85 = pd.to_numeric(pd.Series([latest_row.get("q85_252")]), errors="coerce").iloc[0]
+    q95 = pd.to_numeric(pd.Series([latest_row.get("q95_252")]), errors="coerce").iloc[0]
 
     ulsi_hist = ulsi_df["ulsi"].dropna()
     delta_20d = float(ulsi_hist.iloc[-1] - ulsi_hist.iloc[-21]) if ulsi_hist.shape[0] >= 21 else np.nan
@@ -131,8 +158,25 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
     lines.append("[ULSI Snapshot]")
     lines.append(f"- Current ULSI: {ulsi_value:.3f}")
     lines.append(f"- Regime: {regime}")
+    lines.append(
+        f"- Rolling 252D quantiles (q70/q85/q95): {q70:.3f} / {q85:.3f} / {q95:.3f}"
+        if pd.notna(q70) and pd.notna(q85) and pd.notna(q95)
+        else "- Rolling 252D quantiles (q70/q85/q95): NA"
+    )
     lines.append(f"- Alert: {'ON' if alert else 'OFF'}")
     lines.append(f"- 20D change: {delta_20d:+.3f}" if not np.isnan(delta_20d) else "- 20D change: NA")
+
+    lines.append("")
+    lines.append("[ULSI Components]")
+    if component_snapshot:
+        for item in component_snapshot:
+            latest_value = item["latest"]
+            delta_value = item["delta"]
+            latest_text = f"{latest_value:.3f}" if latest_value is not None else "NA"
+            delta_text = f"{delta_value:+.3f}" if delta_value is not None else "NA"
+            lines.append(f"- {item['label']}: current={latest_text}, delta={delta_text}")
+    else:
+        lines.append("- No valid component values available.")
 
     lines.append("")
     lines.append("[Tech Equity Impact]")
@@ -176,6 +220,7 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
         "ulsi_df": ulsi_df,
         "table_df": table_df,
         "analyses": analyses,
+        "components": component_snapshot,
         "statuses": statuses,
         "as_of": as_of,
     }
@@ -205,8 +250,15 @@ def _render_summary_page(pdf, bundle: dict[str, object]) -> None:
     if not ulsi_df.empty:
         last_year = ulsi_df.tail(252)
         chart_ax.plot(last_year["date"], last_year["ulsi"], color="#1f77b4", linewidth=1.8, label="ULSI")
-        for threshold, color in [(0.5, "#7fbf7b"), (1.5, "#fdae61"), (2.5, "#d7191c")]:
-            chart_ax.axhline(threshold, linestyle="--", linewidth=1.0, color=color)
+        for col, label, color in [
+            ("q70_252", "q70 (252D)", "#7fbf7b"),
+            ("q85_252", "q85 (252D)", "#fdae61"),
+            ("q95_252", "q95 (252D)", "#d7191c"),
+        ]:
+            if col in last_year.columns:
+                vals = pd.to_numeric(last_year[col], errors="coerce")
+                if vals.notna().any():
+                    chart_ax.plot(last_year["date"], vals, linestyle="--", linewidth=1.0, color=color, label=label)
         chart_ax.set_title("ULSI Trend (Last 252 observations)")
         chart_ax.set_xlabel("Date")
         chart_ax.set_ylabel("ULSI")
@@ -308,6 +360,49 @@ def _render_tech_page(pdf, analysis: dict[str, object]) -> None:
     plt.close(fig)
 
 
+def _render_components_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    ulsi_df = pd.DataFrame(bundle["ulsi_df"]).copy()
+    ulsi_df["date"] = pd.to_datetime(ulsi_df["date"], errors="coerce")
+    ulsi_df = ulsi_df.dropna(subset=["date"]).sort_values("date")
+
+    component_map = {
+        "F_t": "Funding Factor (F)",
+        "G_t": "Fiscal Factor (G)",
+        "R_t": "Reserves Factor (R)",
+        "C_t": "Credit Factor (C)",
+    }
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.69, 8.27))
+    fig.suptitle("ULSI Component Trends", fontsize=15, fontweight="bold")
+
+    for ax, (col, label) in zip(axes.flatten(), component_map.items()):
+        if col not in ulsi_df.columns:
+            ax.text(0.5, 0.5, "Series unavailable", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        series_df = ulsi_df[["date", col]].dropna().tail(252)
+        if series_df.empty:
+            ax.text(0.5, 0.5, "No valid observations", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        latest = float(series_df[col].iloc[-1])
+        delta = float(series_df[col].iloc[-1] - series_df[col].iloc[-2]) if series_df.shape[0] > 1 else np.nan
+        ax.plot(series_df["date"], series_df[col], linewidth=1.5)
+        ax.axhline(0.0, color="gray", linewidth=1.0, linestyle="--")
+        title = f"{label}\nLatest={latest:.3f}  Delta={delta:+.3f}" if np.isfinite(delta) else f"{label}\nLatest={latest:.3f}  Delta=NA"
+        ax.set_title(title)
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Value")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def generate_pdf_report(bundle: dict[str, object]) -> bytes:
     """Generate PDF bytes with visualized daily report."""
 
@@ -319,6 +414,7 @@ def generate_pdf_report(bundle: dict[str, object]) -> bytes:
     output = io.BytesIO()
     with PdfPages(output) as pdf:
         _render_summary_page(pdf, bundle)
+        _render_components_page(pdf, bundle)
         analyses = list(bundle.get("analyses", []))
         if analyses:
             for analysis in analyses:

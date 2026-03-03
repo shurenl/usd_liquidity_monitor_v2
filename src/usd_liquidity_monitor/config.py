@@ -44,12 +44,14 @@ SERIES_SPECS: dict[str, SeriesSpec] = {
 }
 
 COMPONENT_WEIGHTS: dict[str, float] = {
-    "funding_price": 0.35,
-    "liquidity_quantity": 0.30,
-    "credit": 0.25,
-    "market_spillover": 0.10,
+    "funding": 0.35,
+    "fiscal": 0.25,
+    "reserves": 0.20,
+    "credit": 0.20,
 }
 
+# Used by legacy fixed alert rule (`ULSI > 1.5 for 3 days`) while regime labels are now
+# computed from rolling quantiles in `metrics.compute_ulsi`.
 REGIME_THRESHOLDS: tuple[float, float, float] = (0.5, 1.5, 2.5)
 
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"

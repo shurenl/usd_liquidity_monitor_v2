@@ -20,6 +20,7 @@ from usd_liquidity_monitor.data import fetch_all_series
 from usd_liquidity_monitor.metrics import compute_features, compute_ulsi
 
 WINDOW_OPTIONS: dict[str, int | None] = {
+    "From 1st valid ULSI": None,
     "1M": 31,
     "3M": 93,
     "1Y": 366,
@@ -36,24 +37,24 @@ REGIME_LABELS: dict[str, str] = {
 }
 
 COMPONENT_LABELS: dict[str, str] = {
-    "funding_price": "Funding Price",
-    "liquidity_quantity": "Liquidity Quantity",
+    "funding": "Funding",
+    "fiscal": "Fiscal (TGA)",
+    "reserves": "Reserves",
     "credit": "Credit",
-    "market_spillover": "Market Spillover",
 }
 
 ZSCORE_LABELS: dict[str, str] = {
-    "z_spread_policy": "Policy Spread Z",
-    "z_spread_repo": "Repo Spread Z",
-    "z_pressure_reserve": "Reserve Pressure Z",
-    "z_pressure_tga": "TGA Pressure Z",
-    "z_pressure_on_rrp": "ON RRP Pressure Z",
-    "z_pressure_fed_assets": "Fed Assets Pressure Z",
-    "z_pressure_cp": "CP Funding Pressure Z",
-    "z_pressure_credit": "Credit Spread Pressure Z",
-    "z_pressure_curve_inversion": "Curve Inversion Pressure Z",
-    "z_pressure_frontend_jump": "Front-End Yield Jump Pressure Z",
-    "z_pressure_market": "Market Spillover Pressure Z",
+    "z_F": "Funding Factor Z (F)",
+    "z_G": "Fiscal Factor Z (G)",
+    "z_R": "Reserves Factor Z (R)",
+    "z_C": "Credit Factor Z (C)",
+}
+
+FACTOR_LABELS: dict[str, str] = {
+    "F_t": "Funding Factor (F)",
+    "G_t": "Fiscal Factor (G)",
+    "R_t": "Reserves Factor (R)",
+    "C_t": "Credit Factor (C)",
 }
 
 
@@ -79,6 +80,14 @@ def _load_data(start: date, end: date) -> dict[str, object]:
 def _window_filter(df: pd.DataFrame, end: date, window: str) -> pd.DataFrame:
     if df.empty:
         return df
+    if window == "From 1st valid ULSI":
+        if "ulsi" not in df.columns:
+            return df
+        valid = df.dropna(subset=["ulsi"])
+        if valid.empty:
+            return df
+        first_valid_date = pd.Timestamp(valid["date"].min())
+        return df[df["date"] >= first_valid_date]
     days = WINDOW_OPTIONS[window]
     if days is None:
         return df
@@ -89,8 +98,23 @@ def _window_filter(df: pd.DataFrame, end: date, window: str) -> pd.DataFrame:
 def _build_overview_figure(ulsi_df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=ulsi_df["date"], y=ulsi_df["ulsi"], mode="lines", name="ULSI"))
-    for threshold, color in [(0.5, "#7fbf7b"), (1.5, "#fdae61"), (2.5, "#d7191c")]:
-        fig.add_hline(y=threshold, line_dash="dot", line_color=color)
+    threshold_specs = [
+        ("q70_252", "q70 (252D)", "#7fbf7b"),
+        ("q85_252", "q85 (252D)", "#fdae61"),
+        ("q95_252", "q95 (252D)", "#d7191c"),
+    ]
+    for col, label, color in threshold_specs:
+        if col in ulsi_df.columns and pd.to_numeric(ulsi_df[col], errors="coerce").notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=ulsi_df["date"],
+                    y=ulsi_df[col],
+                    mode="lines",
+                    name=label,
+                    line={"dash": "dot", "color": color},
+                    opacity=0.9,
+                )
+            )
     fig.update_layout(title="USD Liquidity Stress Index (ULSI)", xaxis_title="Date", yaxis_title="ULSI")
     return fig
 
@@ -179,6 +203,15 @@ def _safe_linear_slope(x: pd.Series, y: pd.Series, min_points: int = 20) -> floa
     return float(slope)
 
 
+def _latest_delta(frame: pd.DataFrame, column: str) -> tuple[float | None, float | None]:
+    series = pd.to_numeric(frame[column], errors="coerce").dropna()
+    if series.empty:
+        return None, None
+    latest = float(series.iloc[-1])
+    delta = float(series.iloc[-1] - series.iloc[-2]) if series.shape[0] > 1 else None
+    return latest, delta
+
+
 def main() -> None:
     st.set_page_config(page_title="USD Liquidity Stress Monitor", layout="wide")
     st.title("USD Liquidity Stress Monitor")
@@ -191,7 +224,7 @@ def main() -> None:
         st.header("Controls")
         start = st.date_input("Start date", value=default_start)
         end = st.date_input("End date", value=today)
-        window = st.selectbox("Chart window", options=list(WINDOW_OPTIONS.keys()), index=2)
+        window = st.selectbox("Chart window", options=list(WINDOW_OPTIONS.keys()), index=0)
         if st.button("Refresh cache"):
             _load_data.clear()
 
@@ -225,7 +258,7 @@ def main() -> None:
     c1.metric("Current ULSI", f"{latest_row['ulsi']:.2f}", f"{delta:+.2f}")
     c1.caption("Interpretation: higher ULSI implies stronger USD liquidity stress; delta is vs. the previous observation.")
     c2.metric("Regime", _regime_label(latest_row["regime"]))
-    c2.caption("Thresholds: <0.5 Normal, 0.5-1.5 Watch, 1.5-2.5 Tight, >2.5 Stress.")
+    c2.caption("Thresholds: regime uses rolling 252-day quantile cutoffs (q70/q85/q95).")
     c3.metric("Alert", "ON" if bool(latest_row["alert_flag"]) else "OFF")
     c3.caption("Rule: alert triggers when ULSI stays above 1.5 for 3 consecutive days.")
 
@@ -234,7 +267,7 @@ def main() -> None:
     with tabs[0]:
         fig = _build_overview_figure(filtered_ulsi)
         st.plotly_chart(fig, width="stretch")
-        st.caption("Chart note: ULSI trend with regime thresholds to show current stress zone and trend direction.")
+        st.caption("Chart note: ULSI trend with rolling 252-day quantile thresholds (q70/q85/q95) to show the current stress zone.")
         png = _safe_png_bytes(fig)
         if png is not None:
             st.download_button("Download overview PNG", data=png, file_name="ulsi_overview.png", mime="image/png")
@@ -263,6 +296,34 @@ def main() -> None:
             z_view.index = [ZSCORE_LABELS.get(name, name) for name in z_view.index]
             st.plotly_chart(px.imshow(z_view, aspect="auto", title="Last 60 days Z-score heatmap"), width="stretch")
             st.caption("Chart note: warmer colors indicate larger positive deviations from historical norms and stronger stress signals.")
+
+        st.subheader("Component Time Series")
+        factor_cols = [col for col in ["F_t", "G_t", "R_t", "C_t"] if col in filtered_ulsi.columns]
+        if factor_cols:
+            component_pairs = [factor_cols[i : i + 2] for i in range(0, len(factor_cols), 2)]
+            for pair in component_pairs:
+                cols = st.columns(len(pair))
+                for container, factor_col in zip(cols, pair):
+                    label = FACTOR_LABELS.get(factor_col, factor_col)
+                    latest_factor, delta_factor = _latest_delta(filtered_ulsi, factor_col)
+                    with container:
+                        st.metric(
+                            label,
+                            f"{latest_factor:.2f}" if latest_factor is not None else "NA",
+                            f"{delta_factor:+.2f}" if delta_factor is not None else None,
+                        )
+                        factor_df = filtered_ulsi[["date", factor_col]].dropna().rename(columns={factor_col: "value"})
+                        if not factor_df.empty:
+                            fig_factor = px.line(
+                                factor_df,
+                                x="date",
+                                y="value",
+                                markers=True,
+                                title=label,
+                            )
+                            fig_factor.add_hline(y=0, line_dash="dot", line_color="gray")
+                            st.plotly_chart(fig_factor, width="stretch")
+                        st.caption("Chart note: positive values mean this factor is adding upward pressure to ULSI; delta is vs. the previous valid observation.")
 
     with tabs[2]:
         funding_cols = ["raw_sofr", "raw_effr", "raw_iorb"]
