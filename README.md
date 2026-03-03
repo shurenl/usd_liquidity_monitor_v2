@@ -82,13 +82,13 @@ What it does:
 
 Published image:
 
-- `ghcr.io/<your-github-username>/usd-liquidity-monitor:latest`
+- `ghcr.io/<your-github-username>/usd-liquidity-monitor-v2:latest`
 
 Run the published image:
 
 ```bash
-docker pull ghcr.io/<your-github-username>/usd-liquidity-monitor:latest
-docker run --rm -p 8501:8501 ghcr.io/<your-github-username>/usd-liquidity-monitor:latest
+docker pull ghcr.io/<your-github-username>/usd-liquidity-monitor-v2:latest
+docker run --rm -p 8501:8501 ghcr.io/<your-github-username>/usd-liquidity-monitor-v2:latest
 ```
 
 Then open:
