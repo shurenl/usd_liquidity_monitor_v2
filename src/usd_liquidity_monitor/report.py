@@ -263,12 +263,14 @@ def _render_summary_page(pdf, bundle: dict[str, object]) -> None:
     fig = plt.figure(figsize=(11.69, 8.27))
     fig.suptitle("USD Liquidity Daily Report", fontsize=16, fontweight="bold")
 
-    text_ax = fig.add_axes([0.05, 0.55, 0.90, 0.35])
+    text_ax = fig.add_axes([0.05, 0.64, 0.90, 0.22])
     text_ax.axis("off")
     text_lines = report_text.splitlines()
-    text_ax.text(0.0, 1.0, "\n".join(text_lines[:28]), va="top", ha="left", fontsize=9, family="monospace")
+    tech_section_idx = next((idx for idx, line in enumerate(text_lines) if line.strip() == "[Tech Equity Impact]"), len(text_lines))
+    summary_lines = text_lines[:tech_section_idx]
+    text_ax.text(0.0, 1.0, "\n".join(summary_lines[:16]), va="top", ha="left", fontsize=9, family="monospace")
 
-    chart_ax = fig.add_axes([0.08, 0.10, 0.86, 0.35])
+    chart_ax = fig.add_axes([0.08, 0.10, 0.86, 0.44])
     if not ulsi_df.empty:
         last_year = ulsi_df.tail(252)
         chart_ax.plot(last_year["date"], last_year["ulsi"], color="#1f77b4", linewidth=1.8, label="ULSI")
@@ -395,6 +397,12 @@ def _render_components_page(pdf, bundle: dict[str, object]) -> None:
         "R_t": "Reserves Factor (R)",
         "C_t": "Credit Factor (C)",
     }
+    formula_map = {
+        "F_t": "F_t = z_score(SOFR - IORB)",
+        "G_t": "G_t = z_score(TGA_t - TGA_t-20)",
+        "R_t": "R_t = z_score(-(DetrendedRes_t - DetrendedRes_t-20))\nDetrendedRes = Reserves - MA252(Reserves)",
+        "C_t": "C_t = z_score(HY_OAS)",
+    }
 
     fig, axes = plt.subplots(2, 2, figsize=(11.69, 8.27))
     fig.suptitle("ULSI Component Trends", fontsize=15, fontweight="bold")
@@ -413,12 +421,22 @@ def _render_components_page(pdf, bundle: dict[str, object]) -> None:
 
         latest = float(series_df[col].iloc[-1])
         delta = float(series_df[col].iloc[-1] - series_df[col].iloc[-2]) if series_df.shape[0] > 1 else np.nan
-        ax.plot(series_df["date"], series_df[col], linewidth=1.5)
+        ax.plot(series_df["date"], series_df[col], linewidth=1.5, marker="o", markersize=2)
         ax.axhline(0.0, color="gray", linewidth=1.0, linestyle="--")
         title = f"{label}\nLatest={latest:.3f}  Delta={delta:+.3f}" if np.isfinite(delta) else f"{label}\nLatest={latest:.3f}  Delta=NA"
         ax.set_title(title)
         ax.set_xlabel("Date")
         ax.set_ylabel("Value")
+        ax.text(
+            0.01,
+            0.02,
+            formula_map[col],
+            transform=ax.transAxes,
+            va="bottom",
+            ha="left",
+            fontsize=7.5,
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.85, "edgecolor": "lightgray"},
+        )
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     pdf.savefig(fig)
@@ -538,9 +556,11 @@ def _render_liquidity_page(pdf, bundle: dict[str, object]) -> None:
     plotted = False
     for col, label in raw_map.items():
         if col in table_df.columns:
-            series = pd.to_numeric(table_df[col], errors="coerce") / 1000.0
-            if series.notna().any():
-                ax.plot(table_df["date"], series, label=label, linewidth=1.5)
+            series_df = table_df[["date", col]].copy()
+            series_df[col] = pd.to_numeric(series_df[col], errors="coerce") / 1000.0
+            series_df = series_df.dropna(subset=[col])
+            if not series_df.empty:
+                ax.plot(series_df["date"], series_df[col], label=label, linewidth=1.5, marker="o", markersize=2)
                 plotted = True
     if plotted:
         ax.set_title("Liquidity Quantity Dynamics (bn USD)")
@@ -553,13 +573,19 @@ def _render_liquidity_page(pdf, bundle: dict[str, object]) -> None:
     ax = axes[1]
     available = [col for col in raw_map if col in table_df.columns]
     if available:
-        idx_df = _build_rebased_index(table_df[["date"] + available], available, base=100.0)
         plotted = False
         for col in available:
-            series = pd.to_numeric(idx_df[col], errors="coerce")
-            if series.notna().any():
-                ax.plot(idx_df["date"], series, label=raw_map[col], linewidth=1.5)
-                plotted = True
+            base_df = table_df[["date", col]].copy()
+            base_df[col] = pd.to_numeric(base_df[col], errors="coerce")
+            base_df = base_df.dropna(subset=[col])
+            if base_df.empty:
+                continue
+            first_value = float(base_df[col].iloc[0])
+            if first_value == 0.0:
+                continue
+            base_df["rebased"] = base_df[col] / first_value * 100.0
+            ax.plot(base_df["date"], base_df["rebased"], label=raw_map[col], linewidth=1.5, marker="o", markersize=2)
+            plotted = True
         if plotted:
             ax.set_title("Liquidity Quantity Dynamics (Rebased Index, start=100)")
             ax.set_ylabel("Index")
