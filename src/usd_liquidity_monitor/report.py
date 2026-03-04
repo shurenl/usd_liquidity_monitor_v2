@@ -35,6 +35,16 @@ EXTERNAL_MONITOR_SPECS: dict[str, dict[str, str]] = {
         "unit": "yield (%)",
         "formula": "Formula: 10Y yield = raw_yield_10y (FRED DGS10)\nNote: this is informational only and does not feed into ULSI.",
     },
+    "spread_10y_2y": {
+        "label": "10Y - 2Y Treasury Spread",
+        "unit": "spread (pp)",
+        "formula": "Formula: spread_10y_2y = raw_yield_10y - raw_yield_2y\nNote: this is informational only and does not feed into ULSI.",
+    },
+    "spread_10y_3m": {
+        "label": "10Y - 3M Treasury Spread",
+        "unit": "spread (pp)",
+        "formula": "Formula: spread_10y_3m = raw_yield_10y - raw_yield_3m\nNote: this is informational only and does not feed into ULSI.",
+    },
 }
 
 
@@ -148,6 +158,15 @@ def _build_rebased_index(frame: pd.DataFrame, columns: list[str], base: float = 
             out[col] = np.nan
             continue
         out[col] = series / float(first_value) * base
+    return out
+
+
+def _build_external_monitor_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    if {"raw_yield_10y", "raw_yield_2y"}.issubset(out.columns):
+        out["spread_10y_2y"] = pd.to_numeric(out["raw_yield_10y"], errors="coerce") - pd.to_numeric(out["raw_yield_2y"], errors="coerce")
+    if {"raw_yield_10y", "raw_yield_3m"}.issubset(out.columns):
+        out["spread_10y_3m"] = pd.to_numeric(out["raw_yield_10y"], errors="coerce") - pd.to_numeric(out["raw_yield_3m"], errors="coerce")
     return out
 
 
@@ -623,14 +642,15 @@ def _render_liquidity_page(pdf, bundle: dict[str, object]) -> None:
 def _render_external_monitors_page(pdf, bundle: dict[str, object]) -> None:
     import matplotlib.pyplot as plt
 
-    table_df = pd.DataFrame(bundle["table_df"]).copy()
+    table_df = _build_external_monitor_frame(pd.DataFrame(bundle["table_df"]).copy())
     table_df["date"] = pd.to_datetime(table_df["date"], errors="coerce")
     table_df = table_df.dropna(subset=["date"]).sort_values("date").tail(252)
 
-    fig, axes = plt.subplots(3, 1, figsize=(11.69, 8.27))
+    fig, axes = plt.subplots(3, 2, figsize=(11.69, 8.27))
     fig.suptitle("External Market Monitors", fontsize=15, fontweight="bold")
 
-    for ax, (col, spec) in zip(axes, EXTERNAL_MONITOR_SPECS.items()):
+    flat_axes = axes.flatten()
+    for ax, (col, spec) in zip(flat_axes, EXTERNAL_MONITOR_SPECS.items()):
         if col not in table_df.columns:
             ax.text(0.5, 0.5, "Series unavailable", ha="center", va="center")
             ax.set_axis_off()
@@ -667,7 +687,10 @@ def _render_external_monitors_page(pdf, bundle: dict[str, object]) -> None:
             bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.85, "edgecolor": "lightgray"},
         )
 
-    fig.tight_layout(rect=[0, 0, 1, 0.97], h_pad=2.0)
+    for ax in flat_axes[len(EXTERNAL_MONITOR_SPECS) :]:
+        ax.set_axis_off()
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97], h_pad=2.0, w_pad=1.8)
     pdf.savefig(fig)
     plt.close(fig)
 

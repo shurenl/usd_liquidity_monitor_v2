@@ -154,6 +154,8 @@ def test_generate_pdf_report_returns_pdf_bytes() -> None:
                 "raw_move_proxy": 0.25,
                 "raw_dxy": 104.0,
                 "raw_yield_10y": 4.3,
+                "raw_yield_2y": 4.0,
+                "raw_yield_3m": 4.5,
             }
         ),
         "quality_df": pd.DataFrame({"series_name": ["sofr"], "latest_date": [pd.Timestamp("2025-03-21").date()], "lag_days": [0], "missing_ratio": [0.0]}),

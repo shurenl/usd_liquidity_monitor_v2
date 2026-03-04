@@ -65,9 +65,11 @@ FACTOR_FORMULAS: dict[str, str] = {
 }
 
 MONITOR_SPECS: dict[str, tuple[str, str, str]] = {
-    "raw_move_proxy": ("MOVE Vol Proxy", "move_proxy", "Displayed as the current public proxy (NFCI) because a direct public MOVE feed is not configured."),
+    "raw_move_proxy": ("MOVE Vol Proxy", "proxy level", "Displayed as the current public proxy (NFCI) because a direct public MOVE feed is not configured. This monitor is informational only and does not feed into ULSI."),
     "raw_dxy": ("DXY Dollar Index", "index level", "Tracks broad USD strength. This monitor is informational only and does not feed into ULSI."),
     "raw_yield_10y": ("US 10Y Treasury Yield", "yield (%)", "Tracks the latest 10-year Treasury yield changes. This monitor is informational only and does not feed into ULSI."),
+    "spread_10y_2y": ("10Y - 2Y Treasury Spread", "spread (pp)", "Formula: raw_yield_10y - raw_yield_2y. This monitor is informational only and does not feed into ULSI."),
+    "spread_10y_3m": ("10Y - 3M Treasury Spread", "spread (pp)", "Formula: raw_yield_10y - raw_yield_3m. This monitor is informational only and does not feed into ULSI."),
 }
 
 
@@ -233,6 +235,15 @@ def _format_metric_delta(delta: float | None) -> str | None:
     return f"{delta:+.2f}" if delta is not None else None
 
 
+def _build_external_monitor_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    if {"raw_yield_10y", "raw_yield_2y"}.issubset(out.columns):
+        out["spread_10y_2y"] = pd.to_numeric(out["raw_yield_10y"], errors="coerce") - pd.to_numeric(out["raw_yield_2y"], errors="coerce")
+    if {"raw_yield_10y", "raw_yield_3m"}.issubset(out.columns):
+        out["spread_10y_3m"] = pd.to_numeric(out["raw_yield_10y"], errors="coerce") - pd.to_numeric(out["raw_yield_3m"], errors="coerce")
+    return out
+
+
 def main() -> None:
     st.set_page_config(page_title="USD Liquidity Stress Monitor", layout="wide")
     st.title("USD Liquidity Stress Monitor")
@@ -349,7 +360,7 @@ def main() -> None:
 
         st.subheader("External Market Monitors")
         monitor_pairs = [list(MONITOR_SPECS.keys())[i : i + 2] for i in range(0, len(MONITOR_SPECS), 2)]
-        filtered_table = _window_filter(table_df, end=end, window=window)
+        filtered_table = _build_external_monitor_frame(_window_filter(table_df, end=end, window=window))
         for pair in monitor_pairs:
             cols = st.columns(len(pair))
             for container, raw_col in zip(cols, pair):

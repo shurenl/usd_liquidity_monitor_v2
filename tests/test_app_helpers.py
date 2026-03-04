@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from usd_liquidity_monitor.app import (
+    _build_external_monitor_frame,
     _build_overview_figure,
     _build_rebased_index,
     _convert_million_to_billion,
@@ -123,3 +124,19 @@ def test_latest_delta_returns_latest_and_change() -> None:
 
     assert latest == pytest.approx(0.9)
     assert delta == pytest.approx(0.5)
+
+
+def test_build_external_monitor_frame_adds_curve_spreads() -> None:
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=2, freq="D"),
+            "raw_yield_10y": [4.4, 4.5],
+            "raw_yield_2y": [4.1, 4.0],
+            "raw_yield_3m": [4.6, 4.4],
+        }
+    )
+
+    out = _build_external_monitor_frame(frame)
+
+    assert out.loc[0, "spread_10y_2y"] == pytest.approx(0.3)
+    assert out.loc[1, "spread_10y_3m"] == pytest.approx(0.1)
