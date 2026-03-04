@@ -151,6 +151,9 @@ def test_generate_pdf_report_returns_pdf_bytes() -> None:
                 "raw_tga": 700_000.0,
                 "raw_fed_assets": 8_500_000.0,
                 "raw_on_rrp": 250_000.0,
+                "raw_move_proxy": 0.25,
+                "raw_dxy": 104.0,
+                "raw_yield_10y": 4.3,
             }
         ),
         "quality_df": pd.DataFrame({"series_name": ["sofr"], "latest_date": [pd.Timestamp("2025-03-21").date()], "lag_days": [0], "missing_ratio": [0.0]}),

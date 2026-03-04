@@ -19,6 +19,24 @@ from .data import fetch_all_series
 from .dashboard import build_alert_objects, build_dashboard_table, format_alerts_for_display, summarize_data_quality
 from .metrics import compute_features, compute_ulsi
 
+EXTERNAL_MONITOR_SPECS: dict[str, dict[str, str]] = {
+    "raw_move_proxy": {
+        "label": "MOVE Volatility Proxy",
+        "unit": "proxy level",
+        "formula": "Formula: MOVE proxy = raw_move_proxy = NFCI public proxy\nNote: this is informational only and does not feed into ULSI.",
+    },
+    "raw_dxy": {
+        "label": "DXY Dollar Index",
+        "unit": "index level",
+        "formula": "Formula: DXY = broad trade-weighted USD index level\nNote: this is informational only and does not feed into ULSI.",
+    },
+    "raw_yield_10y": {
+        "label": "US 10Y Treasury Yield",
+        "unit": "yield (%)",
+        "formula": "Formula: 10Y yield = raw_yield_10y (FRED DGS10)\nNote: this is informational only and does not feed into ULSI.",
+    },
+}
+
 
 def _safe_linear_slope(x: pd.Series, y: pd.Series, min_points: int = 20) -> float | None:
     pairs = pd.concat([x, y], axis=1).dropna()
@@ -602,6 +620,58 @@ def _render_liquidity_page(pdf, bundle: dict[str, object]) -> None:
     plt.close(fig)
 
 
+def _render_external_monitors_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    table_df = pd.DataFrame(bundle["table_df"]).copy()
+    table_df["date"] = pd.to_datetime(table_df["date"], errors="coerce")
+    table_df = table_df.dropna(subset=["date"]).sort_values("date").tail(252)
+
+    fig, axes = plt.subplots(3, 1, figsize=(11.69, 8.27))
+    fig.suptitle("External Market Monitors", fontsize=15, fontweight="bold")
+
+    for ax, (col, spec) in zip(axes, EXTERNAL_MONITOR_SPECS.items()):
+        if col not in table_df.columns:
+            ax.text(0.5, 0.5, "Series unavailable", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        series_df = table_df[["date", col]].copy()
+        series_df[col] = pd.to_numeric(series_df[col], errors="coerce")
+        series_df = series_df.dropna(subset=[col])
+        if series_df.empty:
+            ax.text(0.5, 0.5, "No valid observations", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        latest = float(series_df[col].iloc[-1])
+        delta = float(series_df[col].iloc[-1] - series_df[col].iloc[-2]) if series_df.shape[0] > 1 else np.nan
+        title = (
+            f"{spec['label']}\nLatest={latest:.3f}  Delta={delta:+.3f}  Unit={spec['unit']}"
+            if np.isfinite(delta)
+            else f"{spec['label']}\nLatest={latest:.3f}  Delta=NA  Unit={spec['unit']}"
+        )
+
+        ax.plot(series_df["date"], series_df[col], linewidth=1.5, marker="o", markersize=2)
+        ax.set_title(title)
+        ax.set_xlabel("Date")
+        ax.set_ylabel(spec["unit"])
+        ax.text(
+            0.01,
+            0.02,
+            spec["formula"],
+            transform=ax.transAxes,
+            va="bottom",
+            ha="left",
+            fontsize=7.5,
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.85, "edgecolor": "lightgray"},
+        )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97], h_pad=2.0)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def _render_alerts_page(pdf, bundle: dict[str, object]) -> None:
     import matplotlib.pyplot as plt
 
@@ -692,6 +762,7 @@ def generate_pdf_report(bundle: dict[str, object]) -> bytes:
         _render_contributions_page(pdf, bundle)
         _render_funding_page(pdf, bundle)
         _render_liquidity_page(pdf, bundle)
+        _render_external_monitors_page(pdf, bundle)
         analyses = list(bundle.get("analyses", []))
         if analyses:
             for analysis in analyses:
