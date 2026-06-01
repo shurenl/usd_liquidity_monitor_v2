@@ -1,0 +1,58 @@
+sub_index:
+  name: lev_etf_fragility
+  description: Leveraged ETF fragility proxy from swap-funding pressure and ETF behavior traces.
+  calendar: fred_business_day
+  max_ffill_days: 5
+  zscore_window: 252
+  baseline_weighting: equal
+  aum_rolling_change_days: 20
+  min_abs_benchmark_return: 0.0005
+
+factors:
+  funding_sofr_effr_spread:
+    source: fred
+    sign: 1
+    params:
+      left: sofr
+      right: effr
+    economic_meaning: SOFR above EFFR points to tighter secured funding and swap hedge financing pressure.
+
+  funding_sofr_20d_deviation:
+    source: fred
+    sign: 1
+    params:
+      series: sofr
+      moving_average_days: 20
+    economic_meaning: SOFR jumps versus its own 20-day average capture month-end or quarter-end financing strain.
+
+  leveraged_etf_tracking_gap:
+    source: yfinance
+    sign: 1
+    params:
+      pairs:
+        - leveraged: SOXL
+          benchmark: SOXX
+          leverage: 3
+        - leveraged: TQQQ
+          benchmark: QQQ
+          leverage: 3
+        - leveraged: KORU
+          benchmark: EWY
+          leverage: 3
+    economic_meaning: A wider nominal-minus-realized leverage gap suggests financing, swap, or hedge execution friction.
+
+  leveraged_etf_aum_growth:
+    source: yfinance
+    sign: 1
+    params:
+      tickers:
+        - SOXL
+        - TQQQ
+        - KORU
+    economic_meaning: Fast leveraged ETF AUM or turnover growth increases rebalance flow reflexivity.
+
+hooks:
+  close_flow_concentration:
+    enabled: false
+    source: intraday
+    economic_meaning: Reserved for future intraday close-flow concentration data; not used in the baseline index.

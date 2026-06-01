@@ -15,6 +15,8 @@ dependencies = [
   "numpy>=1.26",
   "pandas>=2.2",
   "requests>=2.31",
+  "PyYAML>=6.0",
+  "yfinance>=0.2.40",
   "streamlit>=1.33",
   "plotly>=5.20",
   "matplotlib>=3.8"
@@ -29,12 +31,16 @@ dev = [
 ulsi-sync = "usd_liquidity_monitor.cli:main"
 ulsi-dashboard = "usd_liquidity_monitor.app:main"
 ulsi-daily-report = "usd_liquidity_monitor.report:main"
+ulsi-lev-etf-diagnose = "usd_liquidity_monitor.lev_etf_integration:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"usd_liquidity_monitor.configs" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

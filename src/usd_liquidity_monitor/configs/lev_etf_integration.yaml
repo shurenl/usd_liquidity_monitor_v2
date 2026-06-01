@@ -1,0 +1,36 @@
+analysis:
+  start_years_back: 5
+  output_dir: lev_etf_integration_output
+  max_ffill_days: 5
+
+redundancy:
+  rolling_corr_window: 63
+  high_r2_threshold: 0.70
+
+target:
+  source: fred
+  series_name: vix
+  transform: future_change
+  horizons: [5, 10, 21]
+  primary_horizon: 5
+  description: Future VIX level change. target_t = VIX_{t+h} - VIX_t.
+
+ic:
+  method: spearman
+  rolling_window: 126
+  rolling_min_periods: 60
+  min_observations: 40
+  meaningful_abs_ic: 0.03
+  improvement_threshold: 0.02
+  stable_sign_share: 0.60
+  trim_extreme_pct: 0.01
+
+subsamples:
+  # Leave empty to split the available aligned sample into three equal date blocks.
+  periods: []
+
+ab_test:
+  # This is an analysis-only candidate blend. Production ULSI is not changed.
+  # If an external IC weighting module produces weights, pass them to the Python
+  # functions rather than relying on this diagnostic default.
+  lev_weight: 0.10

@@ -31,6 +31,90 @@ A Python app to monitor USD liquidity stress on a daily basis using public data.
 - `pressure_market = z(VIX) + z(MOVE_proxy) + z(DXY)`
 - `ULSI = sum(weight_i * z_component_i)`
 
+## Leveraged ETF Fragility Sub-Index
+
+The project also includes an optional sub-index named `lev_etf_fragility`.
+It is designed to be merged into a broader factor set as a signed z-score
+series, without changing the core four-factor ULSI formula.
+
+Configuration:
+
+- `src/usd_liquidity_monitor/configs/lev_etf_fragility.yaml`
+
+Factor groups:
+
+- Bank funding pressure:
+  `SOFR - EFFR` and `SOFR - rolling_mean(SOFR, 20B)`.
+  These proxy secured funding tightness and calendar-related swap financing stress.
+- Leveraged ETF behavior traces:
+  tracking gap for configurable `(leveraged ETF, benchmark ETF, leverage)` pairs,
+  plus AUM growth proxies for configured leveraged ETF tickers.
+- Close-flow concentration:
+  reserved hook for future intraday data; not active in the baseline version.
+
+Every factor in YAML has an explicit `sign`:
+
+- `1`: larger raw value means higher fragility.
+- `-1`: larger raw value means lower fragility.
+
+AUM approximation is explicit in logs:
+
+- Preferred proxy: `close * sharesOutstanding`.
+- Fallback proxy: `close * volume` turnover if shares are unavailable.
+
+Run the minimal example:
+
+```bash
+python -m usd_liquidity_monitor.lev_etf_fragility
+```
+
+It fetches the latest two years, prints latest raw factors and signed z-scores,
+and saves:
+
+```bash
+lev_etf_fragility.png
+```
+
+### Leveraged ETF Integration Diagnostic
+
+Before adding the sub-index to production ULSI, run the integration diagnostic:
+
+```bash
+ulsi-lev-etf-diagnose --start 2021-01-01 --end 2026-06-01 --output-dir /tmp/lev_etf_integration
+```
+
+or:
+
+```bash
+python -m usd_liquidity_monitor.lev_etf_integration --output-dir /tmp/lev_etf_integration
+```
+
+Default configuration:
+
+- `src/usd_liquidity_monitor/configs/lev_etf_integration.yaml`
+
+What it checks:
+
+- Redundancy: full-sample/rolling correlation and OLS R² versus existing ULSI factor z-scores.
+- Incremental value: forward Spearman IC versus future VIX changes, including residual IC after removing existing factor exposure.
+- Stability: rolling IC, date subsamples, and top-1% absolute signal trimming.
+- A/B comparison: `ulsi_base` versus an analysis-only candidate `ulsi_with_lev`.
+
+The forward target avoids look-ahead bias:
+
+```text
+target_t = VIX_{t+h} - VIX_t
+```
+
+Artifacts:
+
+- `lev_etf_integration_diagnostic.md`
+- `redundancy_correlation_heatmap.png`
+- `rolling_correlation.png`
+- `rolling_ic.png`
+- `lev_etf_fragility_residual.png`
+- `ulsi_ab_comparison.png`
+
 ## Regime Thresholds
 
 - `<0.5`: Normal
@@ -95,7 +179,7 @@ Then open:
 
 - `http://localhost:8501`
 
-## GitHub Daily 9AM Email Report
+## GitHub Daily 9:30AM Email Report
 
 This repository also includes:
 
@@ -103,7 +187,7 @@ This repository also includes:
 
 Schedule:
 
-- Runs daily at **09:00 Asia/Shanghai** (`01:00 UTC`) via GitHub Actions schedule.
+- Runs daily at **09:30 Asia/Shanghai** (`01:30 UTC`) via GitHub Actions schedule.
 
 Workflow behavior:
 
