@@ -75,12 +75,38 @@ def test_generate_daily_report_contains_sections(monkeypatch) -> None:
     monkeypatch.setattr(report, "compute_features", lambda raw: features_df)
     monkeypatch.setattr(report, "compute_ulsi", lambda feat: ulsi_df)
     monkeypatch.setattr(report, "build_dashboard_table", lambda raw, feat, ulsi: table_df)
+    monkeypatch.setattr(
+        report,
+        "compute_lev_etf_fragility",
+        lambda start, end: (
+            pd.Series([0.1, 0.2, 0.3, 0.4], index=table_df["date"], name="lev_etf_fragility"),
+            pd.DataFrame(
+                {
+                    "funding_sofr_effr_spread": [0.1, 0.2, 0.3, 0.4],
+                    "funding_sofr_20d_deviation": [0.0, 0.1, 0.2, 0.3],
+                    "leveraged_etf_tracking_gap": [0.2, 0.2, 0.3, 0.3],
+                    "leveraged_etf_aum_growth": [0.0, 0.1, 0.1, 0.2],
+                },
+                index=table_df["date"],
+            ),
+            pd.DataFrame(
+                {
+                    "funding_sofr_effr_spread": [0.01, 0.02, 0.03, 0.04],
+                    "funding_sofr_20d_deviation": [0.0, 0.01, 0.02, 0.03],
+                    "leveraged_etf_tracking_gap": [0.2, 0.2, 0.3, 0.3],
+                    "leveraged_etf_aum_growth": [0.0, 0.1, 0.1, 0.2],
+                },
+                index=table_df["date"],
+            ),
+        ),
+    )
 
     text = generate_daily_report(as_of=pd.Timestamp("2025-01-06").date(), lookback_days=10)
 
     assert "[ULSI Snapshot]" in text
     assert "[ULSI Components]" in text
     assert "[Tech Equity Impact]" in text
+    assert "[Leveraged ETF Fragility]" in text
     assert "[Data Sync Summary]" in text
 
 
@@ -162,6 +188,40 @@ def test_generate_pdf_report_returns_pdf_bytes() -> None:
         "alerts": [],
         "statuses": {},
         "as_of": pd.Timestamp("2025-03-21").date(),
+        "lev_etf": {
+            "available": True,
+            "lev_series": pd.Series([0.1 + i * 0.01 for i in range(80)], index=impact["date"], name="lev_etf_fragility"),
+            "lev_zscores": pd.DataFrame(
+                {
+                    "funding_sofr_effr_spread": [0.1 + i * 0.001 for i in range(80)],
+                    "funding_sofr_20d_deviation": [0.2 + i * 0.001 for i in range(80)],
+                    "leveraged_etf_tracking_gap": [0.3 + i * 0.001 for i in range(80)],
+                    "leveraged_etf_aum_growth": [0.4 + i * 0.001 for i in range(80)],
+                },
+                index=impact["date"],
+            ),
+            "lev_raw": pd.DataFrame(
+                {
+                    "funding_sofr_effr_spread": [0.01] * 80,
+                    "funding_sofr_20d_deviation": [0.02] * 80,
+                    "leveraged_etf_tracking_gap": [0.03] * 80,
+                    "leveraged_etf_aum_growth": [0.04] * 80,
+                },
+                index=impact["date"],
+            ),
+            "latest_value": 0.9,
+            "delta_20d": 0.2,
+            "ols_r2": 0.4,
+            "lev_ic": 0.05,
+            "resid_ic": 0.04,
+            "base_ic": 0.03,
+            "candidate_ic": 0.06,
+            "ic_improvement": 0.03,
+            "candidate_sign": 1,
+            "ab_corr": 0.98,
+            "recommendation": "GO candidate",
+            "sign_note": "keep sign +1",
+        },
     }
 
     payload = generate_pdf_report(bundle)

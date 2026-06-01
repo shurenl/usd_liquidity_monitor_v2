@@ -17,6 +17,8 @@ import pandas as pd
 
 from .data import fetch_all_series
 from .dashboard import build_alert_objects, build_dashboard_table, format_alerts_for_display, summarize_data_quality
+from .lev_etf_fragility import compute_lev_etf_fragility
+from .lev_etf_integration import build_forward_target, compose_candidate_ulsi_with_lev, fit_ols_residual, spearman_ic
 from .metrics import compute_features, compute_ulsi
 
 EXTERNAL_MONITOR_SPECS: dict[str, dict[str, str]] = {
@@ -46,6 +48,29 @@ EXTERNAL_MONITOR_SPECS: dict[str, dict[str, str]] = {
         "formula": "Formula: spread_10y_3m = raw_yield_10y - raw_yield_3m\nNote: this is informational only and does not feed into ULSI.",
     },
 }
+
+LEV_ETF_FACTOR_EXPLANATIONS: dict[str, str] = {
+    "funding_sofr_effr_spread": (
+        "Formula: SOFR - EFFR\n"
+        "Meaning: secured funding pressure. Wider spread means swap hedge financing is tighter."
+    ),
+    "funding_sofr_20d_deviation": (
+        "Formula: SOFR - MA20(SOFR)\n"
+        "Meaning: captures month-end/quarter-end funding jumps before ETF behavior fully appears."
+    ),
+    "leveraged_etf_tracking_gap": (
+        "Formula: average[nominal leverage - realized leverage]\n"
+        "Pairs: SOXL/SOXX, TQQQ/QQQ, KORU/EWY by YAML config.\n"
+        "Meaning: wider gap indicates financing, swap, or hedge execution friction."
+    ),
+    "leveraged_etf_aum_growth": (
+        "Formula: 20D change of close*sharesOutstanding, or close*volume if shares are unavailable\n"
+        "Meaning: fast AUM/turnover growth raises rebalance-flow reflexivity."
+    ),
+}
+
+LEV_ETF_DIAGNOSTIC_HORIZON = 5
+LEV_ETF_CANDIDATE_WEIGHT = 0.10
 
 
 def _safe_linear_slope(x: pd.Series, y: pd.Series, min_points: int = 20) -> float | None:
@@ -170,6 +195,129 @@ def _build_external_monitor_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _fmt_optional(value: object, digits: int = 3, signed: bool = False) -> str:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return "NA"
+    return f"{float(numeric):+.{digits}f}" if signed else f"{float(numeric):.{digits}f}"
+
+
+def _build_lev_etf_report_bundle(
+    raw_df: pd.DataFrame,
+    ulsi_df: pd.DataFrame,
+    *,
+    start: date,
+    as_of: date,
+) -> dict[str, object]:
+    """Build analysis-only leveraged ETF fragility content for the daily PDF."""
+
+    try:
+        lev_series, lev_zscores, lev_raw = compute_lev_etf_fragility(start, as_of)
+    except Exception as exc:  # noqa: BLE001 - the daily email must degrade gracefully.
+        return {
+            "available": False,
+            "error": str(exc),
+            "lev_series": pd.Series(dtype=float, name="lev_etf_fragility"),
+            "lev_zscores": pd.DataFrame(),
+            "lev_raw": pd.DataFrame(),
+        }
+
+    lev_series = pd.to_numeric(lev_series, errors="coerce").rename("lev_etf_fragility")
+    lev_zscores = pd.DataFrame(lev_zscores).apply(pd.to_numeric, errors="coerce")
+    lev_raw = pd.DataFrame(lev_raw).apply(pd.to_numeric, errors="coerce")
+
+    ulsi_work = pd.DataFrame(ulsi_df).copy()
+    ulsi_work["date"] = pd.to_datetime(ulsi_work["date"], errors="coerce")
+    ulsi_work = ulsi_work.dropna(subset=["date"]).set_index("date").sort_index()
+    factor_cols = [col for col in ["z_F", "z_G", "z_R", "z_C"] if col in ulsi_work.columns]
+    ulsi_factors = ulsi_work[factor_cols].apply(pd.to_numeric, errors="coerce") if factor_cols else pd.DataFrame(index=ulsi_work.index)
+    ulsi_base = pd.to_numeric(ulsi_work.get("ulsi"), errors="coerce").rename("ulsi_base")
+    lev_aligned = lev_series.reindex(ulsi_work.index)
+
+    latest_lev = lev_aligned.dropna().tail(1)
+    latest_value = float(latest_lev.iloc[0]) if not latest_lev.empty else np.nan
+    lev_hist = lev_aligned.dropna()
+    delta_20d = float(lev_hist.iloc[-1] - lev_hist.iloc[-21]) if lev_hist.shape[0] >= 21 else np.nan
+
+    ols_r2 = np.nan
+    residual = pd.Series(np.nan, index=ulsi_work.index, name="lev_etf_fragility_resid")
+    if not ulsi_factors.empty:
+        ols = fit_ols_residual(lev_aligned, ulsi_factors)
+        ols_r2 = ols.r2
+        residual = ols.residual
+
+    target = build_forward_target(
+        raw_df,
+        series_name="vix",
+        horizon=LEV_ETF_DIAGNOSTIC_HORIZON,
+        start=start,
+        end=as_of,
+        max_ffill_days=5,
+    ).reindex(ulsi_work.index)
+
+    lev_ic = spearman_ic(lev_aligned, target, min_observations=40)
+    resid_ic = spearman_ic(residual, target, min_observations=40)
+    base_ic = spearman_ic(ulsi_base, target, min_observations=40)
+    sign_source = resid_ic if pd.notna(resid_ic) else lev_ic
+    candidate_sign = -1 if pd.notna(sign_source) and sign_source < 0 else 1
+    ulsi_with_lev = compose_candidate_ulsi_with_lev(
+        ulsi_base,
+        lev_aligned,
+        lev_sign=candidate_sign,
+        lev_weight=LEV_ETF_CANDIDATE_WEIGHT,
+    )
+    candidate_ic = spearman_ic(ulsi_with_lev, target, min_observations=40)
+    ic_improvement = candidate_ic - base_ic if pd.notna(candidate_ic) and pd.notna(base_ic) else np.nan
+    ab_corr_frame = pd.concat([ulsi_base, ulsi_with_lev], axis=1).dropna()
+    ab_corr = (
+        float(ab_corr_frame.rank(method="average").corr().iloc[0, 1])
+        if ab_corr_frame.shape[0] >= 3
+        else np.nan
+    )
+
+    # This mirrors the diagnostic module thresholds but stays intentionally conservative.
+    go = (
+        pd.notna(ols_r2)
+        and ols_r2 <= 0.70
+        and pd.notna(resid_ic)
+        and abs(resid_ic) >= 0.03
+        and pd.notna(ic_improvement)
+        and ic_improvement >= 0.02
+    )
+    recommendation = (
+        "GO candidate: independent predictive evidence is strong enough for a controlled production experiment."
+        if go
+        else "NO-GO for production inclusion now: keep as an explanatory monitor until redundancy/IC evidence improves."
+    )
+    sign_note = (
+        "Residual/primary IC is negative; candidate blend flips sign (-1), treating it as a contrarian signal."
+        if candidate_sign < 0
+        else "Residual/primary IC is non-negative or unavailable; candidate blend keeps sign (+1)."
+    )
+
+    return {
+        "available": True,
+        "error": "",
+        "lev_series": lev_aligned,
+        "lev_zscores": lev_zscores.reindex(ulsi_work.index),
+        "lev_raw": lev_raw.reindex(ulsi_work.index),
+        "latest_value": latest_value,
+        "delta_20d": delta_20d,
+        "ols_r2": ols_r2,
+        "lev_ic": lev_ic,
+        "resid_ic": resid_ic,
+        "base_ic": base_ic,
+        "candidate_ic": candidate_ic,
+        "ic_improvement": ic_improvement,
+        "candidate_sign": candidate_sign,
+        "ab_corr": ab_corr,
+        "recommendation": recommendation,
+        "sign_note": sign_note,
+        "ulsi_with_lev": ulsi_with_lev,
+        "target_name": f"forward_vix_change_{LEV_ETF_DIAGNOSTIC_HORIZON}d",
+    }
+
+
 def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str, object]:
     start = as_of - timedelta(days=lookback_days)
     raw_df, statuses = fetch_all_series(start=start, end=as_of)
@@ -180,6 +328,7 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
     component_snapshot = _extract_component_snapshot(ulsi_df)
     quality_df = summarize_data_quality(raw_df, as_of=as_of)
     alerts = build_alert_objects(ulsi_df)
+    lev_etf = _build_lev_etf_report_bundle(raw_df, ulsi_df, start=start, as_of=as_of)
 
     lines: list[str] = []
     lines.append(f"USD Liquidity Daily Report ({as_of.isoformat()})")
@@ -199,6 +348,7 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
             "alerts": alerts,
             "statuses": statuses,
             "as_of": as_of,
+            "lev_etf": lev_etf,
         }
 
     latest_row = latest.iloc[0]
@@ -264,6 +414,18 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
         lines.append("- No Nasdaq series available in current dataset.")
 
     lines.append("")
+    lines.append("[Leveraged ETF Fragility]")
+    if bool(lev_etf.get("available")):
+        lines.append(f"- Current lev_etf_fragility: {_fmt_optional(lev_etf.get('latest_value'))}")
+        lines.append(f"- 20D change: {_fmt_optional(lev_etf.get('delta_20d'), signed=True)}")
+        lines.append(f"- Redundancy OLS R2 vs existing ULSI factors: {_fmt_optional(lev_etf.get('ols_r2'))}")
+        lines.append(f"- 5D forward VIX IC (raw/residual/base/candidate): {_fmt_optional(lev_etf.get('lev_ic'))} / {_fmt_optional(lev_etf.get('resid_ic'))} / {_fmt_optional(lev_etf.get('base_ic'))} / {_fmt_optional(lev_etf.get('candidate_ic'))}")
+        lines.append(f"- Candidate sign: {int(lev_etf.get('candidate_sign', 1)):+d}")
+        lines.append(f"- Recommendation: {lev_etf.get('recommendation')}")
+    else:
+        lines.append(f"- Unavailable: {lev_etf.get('error', 'unknown error')}")
+
+    lines.append("")
     lines.append("[Data Sync Summary]")
     failures = [name for name, status in statuses.items() if not status.success]
     lines.append(f"- Total series: {len(statuses)}")
@@ -282,6 +444,7 @@ def _build_report_bundle(as_of: date, lookback_days: int = 365 * 3) -> dict[str,
         "alerts": alerts,
         "statuses": statuses,
         "as_of": as_of,
+        "lev_etf": lev_etf,
     }
 
 
@@ -695,6 +858,166 @@ def _render_external_monitors_page(pdf, bundle: dict[str, object]) -> None:
     plt.close(fig)
 
 
+def _render_lev_etf_fragility_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    lev_bundle = dict(bundle.get("lev_etf", {}))
+    fig, axes = plt.subplots(2, 2, figsize=(11.69, 8.27))
+    fig.suptitle("Leveraged ETF Fragility Monitor", fontsize=15, fontweight="bold")
+
+    if not bool(lev_bundle.get("available")):
+        for ax in axes.flatten():
+            ax.set_axis_off()
+        axes[0, 0].text(
+            0.02,
+            0.98,
+            "Leveraged ETF fragility monitor is unavailable.\n"
+            f"Reason: {lev_bundle.get('error', 'unknown error')}\n\n"
+            "The daily report continues because this monitor is analysis-only and does not feed production ULSI.",
+            va="top",
+            ha="left",
+            fontsize=10,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        pdf.savefig(fig)
+        plt.close(fig)
+        return
+
+    lev_series = pd.Series(lev_bundle.get("lev_series", pd.Series(dtype=float))).dropna().tail(252)
+    lev_zscores = pd.DataFrame(lev_bundle.get("lev_zscores", pd.DataFrame())).tail(252)
+    lev_raw = pd.DataFrame(lev_bundle.get("lev_raw", pd.DataFrame())).tail(252)
+
+    ax = axes[0, 0]
+    if not lev_series.empty:
+        ax.plot(lev_series.index, lev_series.values, color="black", linewidth=1.6)
+        ax.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+        ax.set_title(
+            "Sub-Index Trend\n"
+            f"Latest={_fmt_optional(lev_bundle.get('latest_value'))}  "
+            f"20D Change={_fmt_optional(lev_bundle.get('delta_20d'), signed=True)}"
+        )
+        ax.set_ylabel("z-score composite")
+    else:
+        ax.text(0.5, 0.5, "No valid sub-index observations", ha="center", va="center")
+        ax.set_axis_off()
+
+    ax = axes[0, 1]
+    z_cols = [col for col in LEV_ETF_FACTOR_EXPLANATIONS if col in lev_zscores.columns]
+    plotted = False
+    for col in z_cols:
+        series = pd.to_numeric(lev_zscores[col], errors="coerce").dropna()
+        if not series.empty:
+            ax.plot(series.index, series.values, label=col.replace("_", " "), linewidth=1.1)
+            plotted = True
+    if plotted:
+        ax.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+        ax.set_title("Signed Factor Z-Scores")
+        ax.set_ylabel("z-score")
+        ax.legend(loc="best", fontsize=6.5)
+    else:
+        ax.text(0.5, 0.5, "ETF/yfinance factors may be unavailable or rate-limited", ha="center", va="center", wrap=True)
+        ax.set_axis_off()
+
+    ax = axes[1, 0]
+    raw_cols = [col for col in LEV_ETF_FACTOR_EXPLANATIONS if col in lev_raw.columns]
+    latest_rows: list[list[str]] = []
+    for col in raw_cols:
+        raw_series = pd.to_numeric(lev_raw[col], errors="coerce").dropna()
+        z_series = pd.to_numeric(lev_zscores[col], errors="coerce").dropna() if col in lev_zscores.columns else pd.Series(dtype=float)
+        latest_rows.append(
+            [
+                col.replace("_", " "),
+                _fmt_optional(raw_series.iloc[-1] if not raw_series.empty else np.nan),
+                _fmt_optional(z_series.iloc[-1] if not z_series.empty else np.nan),
+            ]
+        )
+    ax.axis("off")
+    if latest_rows:
+        table = ax.table(cellText=latest_rows, colLabels=["Factor", "Latest Raw", "Latest Z"], loc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(7.2)
+        table.scale(1, 1.35)
+        ax.set_title("Latest Factor Snapshot")
+    else:
+        ax.text(0.02, 0.98, "No raw factor snapshot available.", va="top", ha="left")
+
+    ax = axes[1, 1]
+    ax.axis("off")
+    text = [
+        "Economic Interpretation",
+        "",
+        "Leveraged ETFs often hold total return swaps. Dealer counterparties hedge in cash markets.",
+        "Daily rebalance flow can become reflexive: up markets require buying; down markets require selling.",
+        "This monitor is analysis-only and does not currently feed production ULSI.",
+        "",
+        "Current diagnostic:",
+        f"- OLS R2 vs existing ULSI factors: {_fmt_optional(lev_bundle.get('ols_r2'))}",
+        f"- 5D VIX IC raw/residual: {_fmt_optional(lev_bundle.get('lev_ic'))} / {_fmt_optional(lev_bundle.get('resid_ic'))}",
+        f"- Candidate sign: {int(lev_bundle.get('candidate_sign', 1)):+d}",
+        f"- Recommendation: {lev_bundle.get('recommendation', 'NA')}",
+    ]
+    ax.text(0.02, 0.98, "\n".join(text), va="top", ha="left", fontsize=8.2, wrap=True)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95], h_pad=2.0, w_pad=1.6)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _render_lev_etf_explanation_page(pdf, bundle: dict[str, object]) -> None:
+    import matplotlib.pyplot as plt
+
+    lev_bundle = dict(bundle.get("lev_etf", {}))
+    fig, axes = plt.subplots(2, 1, figsize=(11.69, 8.27), gridspec_kw={"height_ratios": [1.05, 1.2]})
+    fig.suptitle("Leveraged ETF Fragility: Factor Definitions and A/B Diagnostic", fontsize=15, fontweight="bold")
+
+    ax = axes[0]
+    ax.axis("off")
+    explanation_lines = [
+        "Factor formulas and direction:",
+        "",
+    ]
+    for name, text in LEV_ETF_FACTOR_EXPLANATIONS.items():
+        explanation_lines.append(f"- {name}:")
+        explanation_lines.extend([f"  {line}" for line in text.splitlines()])
+    explanation_lines.extend(
+        [
+            "",
+            "Direction: every factor is signed in YAML before composition. Larger signed z-score means higher fragility.",
+            "Missing data policy: public inputs are forward-filled with a 5-business-day limit; stale values become NaN.",
+            "AUM policy: yfinance has no reliable historical AUM; close*sharesOutstanding is preferred, close*volume is fallback.",
+        ]
+    )
+    ax.text(0.02, 0.98, "\n".join(explanation_lines), va="top", ha="left", fontsize=7.4, wrap=True)
+
+    ax = axes[1]
+    ax.axis("off")
+    if not bool(lev_bundle.get("available")):
+        ax.text(0.02, 0.98, f"Diagnostic unavailable: {lev_bundle.get('error', 'unknown error')}", va="top", ha="left")
+    else:
+        recommendation = str(lev_bundle.get("recommendation", "NA"))
+        decision = "GO" if recommendation.startswith("GO") else "NO-GO" if recommendation.startswith("NO-GO") else "NA"
+        rows = [
+            ["Redundancy OLS R2", _fmt_optional(lev_bundle.get("ols_r2")), "R2 > 0.70 means high linear redundancy."],
+            ["Raw IC vs 5D future VIX change", _fmt_optional(lev_bundle.get("lev_ic")), "Forward target: VIX[t+5] - VIX[t]."],
+            ["Residual IC vs 5D future VIX change", _fmt_optional(lev_bundle.get("resid_ic")), "Pure new information after existing factor exposure."],
+            ["ULSI base IC", _fmt_optional(lev_bundle.get("base_ic")), "Current production ULSI predictive benchmark."],
+            ["Candidate ULSI IC", _fmt_optional(lev_bundle.get("candidate_ic")), "Analysis-only blend, not production."],
+            ["IC improvement", _fmt_optional(lev_bundle.get("ic_improvement"), signed=True), "Candidate minus base. < +0.02 is weak."],
+            ["Base vs candidate corr", _fmt_optional(lev_bundle.get("ab_corr")), "High value means little practical index change."],
+            ["Suggested sign", f"{int(lev_bundle.get('candidate_sign', 1)):+d}", "Negative IC means contrarian sign; positive IC keeps sign."],
+            ["Go / No-Go", decision, "Evidence-based decision; production ULSI is unchanged."],
+        ]
+        table = ax.table(cellText=rows, colLabels=["Diagnostic", "Value", "Interpretation"], loc="center", colWidths=[0.24, 0.13, 0.56])
+        table.auto_set_font_size(False)
+        table.set_fontsize(7.0)
+        table.scale(1, 1.45)
+        ax.text(0.02, 0.04, recommendation, va="bottom", ha="left", fontsize=7.2, wrap=True)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95], h_pad=2.0)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def _render_alerts_page(pdf, bundle: dict[str, object]) -> None:
     import matplotlib.pyplot as plt
 
@@ -769,6 +1092,10 @@ def _render_data_quality_page(pdf, bundle: dict[str, object]) -> None:
         table.scale(1, 1.3)
         ax.set_title(title)
 
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    pdf.savefig(fig)
+    plt.close(fig)
+
 
 def generate_pdf_report(bundle: dict[str, object]) -> bytes:
     """Generate PDF bytes with visualized daily report."""
@@ -786,6 +1113,8 @@ def generate_pdf_report(bundle: dict[str, object]) -> bytes:
         _render_funding_page(pdf, bundle)
         _render_liquidity_page(pdf, bundle)
         _render_external_monitors_page(pdf, bundle)
+        _render_lev_etf_fragility_page(pdf, bundle)
+        _render_lev_etf_explanation_page(pdf, bundle)
         analyses = list(bundle.get("analyses", []))
         if analyses:
             for analysis in analyses:
